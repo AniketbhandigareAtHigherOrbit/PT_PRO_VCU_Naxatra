@@ -8,10 +8,12 @@ void Naxatra_CAN_BuildCommand(uint8_t *data, uint16_t rpm,
     uint8_t i;
     if (data == 0) { return; }
     for (i = 0U; i < 8U; i++) { data[i] = 0U; }
-    data[1] = 0x08U; /* CAN-controlled; reserved bits zero. */
+    data[0] = 0U;    /* VcuThrottlePercent: unused in speed mode. */
+    data[1] = 0x08U; /* VcuSoftCmdEn: CAN-controlled, other bits clear. */
     data[2] = 0x01U; /* Soft response, speed mode; cruise/regen off. */
     data[5] = NAXATRA_ACCEL_TIME_DS;
     data[6] = NAXATRA_DECEL_TIME_DS;
+    data[7] = NAXATRA_DC_FDB_CURRENT_RAW;
     if ((enable == 0U) || (brake != 0U) ||
         ((direction != DIR_FORWARD) && (direction != DIR_REVERSE)))
     {
@@ -44,6 +46,11 @@ void Naxatra_CAN_SendCommand(ControllerIndex_t index, uint16_t rpm,
         (stop != 0U) ? 0U : enable, direction, brake);
     CanMsgTransmit(NAXATRA_ROTOR_CHANNEL, data, 8U, 0U, 0U,
                    NAXATRA_COMMAND_ID);
+
+    /* Track the direction actually requested on 0x415, not the last RX
+     * status bit. A zero-RPM startup command still selects its gear. */
+    VS_Controller[CTRL_ROTOR].command_dir =
+        (stop != 0U) ? DIR_STOP : direction;
 
     if ((stop == 0U) && (startup_ms < NAXATRA_STARTUP_ZERO_MS))
     {

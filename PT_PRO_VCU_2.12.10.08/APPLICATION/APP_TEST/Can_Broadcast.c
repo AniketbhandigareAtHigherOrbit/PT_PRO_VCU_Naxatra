@@ -23,6 +23,7 @@
 #define CANID_WHEEL_SYNC_DIAG     0x709U
 
 #define CANID_ROTOR_DC_BUS       0x750U
+#define CANID_ROTOR_DQ_STATUS    0x751U
 #define CANID_CTRL_TEMPS         0x720U
 #define CANID_BMS1_TEMPS         0x721U
 #define CANID_BMS1_CELL_1_4      0x722U
@@ -54,6 +55,11 @@
 /* ================= Timing ================= */
 #define BROADCAST_1S_TICKS       10U 
 #define BROADCAST_60S_TICKS      600U 
+
+/* 0x233 has no cycle-time attribute in the supplier's R0 DBC. Mark its
+ * latest values fresh for 600 ms after reception; always send a validity
+ * bit so IoT can reject stale or never-received Id/Iq measurements. */
+#define ROTOR_DQ_FRESHNESS_MS    600U
 
 /* ================= Timing for 100ms and 1sec =================
 #define BROADCAST_1S_TICKS       1U 
@@ -177,10 +183,70 @@ static void Broadcast_SendRotorDcBus(void)
     memset(buf, 0, sizeof(buf));
     U16_TO_CAN_BE(buf, 0U, (uint16_t)(int16_t)current_dA);
     U16_TO_CAN_BE(buf, 2U, rotor.battery_voltage_dV);
-    buf[4] = (uint8_t)(rotor.error_code >> 8U);
-    buf[5] = (uint8_t)(rotor.error_code & 0xFFU);
+    /* Keep Naxatra_CAN0_Telemetry.dbc unchanged: motor-status low nibble
+     * and controller-status bit 0 are reserved in CAN0 0x750. R0 adds
+     * CANRevLost/LostPhaseFault internally and in the existing 0x704 error
+     * word, but they must not leak into these reserved 0x750 positions. */
+    buf[4] = (uint8_t)((rotor.error_code >> 8U) & 0xF0U);
+    buf[5] = (uint8_t)(rotor.error_code & 0xFEU);
     U16_TO_CAN_BE(buf, 6U, Current_To_CAN((float)rotor.phase_current_RMS_A));
     Broadcast_Tx(CANID_ROTOR_DC_BUS, buf);
+}
+
+/* CAN0 0x751: signed Iq and Id currents, 1 A/count, Motorola big-endian.
+ * Byte 4 flags: bit0 LostPhaseFault, bit1 CANRevLost, bit2 DQ received,
+ * bit3 DQ fresh, bit4 status 0x411 fresh, bit5 status 0x412 fresh.
+ * Bytes 5-6: age of the most recent 0x233 frame, in milliseconds.
+ * Byte 7 is reserved zero. All fields are defined in the IoT R1 DBC. */
+static void Broadcast_SendRotorDqStatus(void)
+{
+    uint8_t buf[8];
+    ControllerFeedbackSnapshot_t rotor;
+
+    if (Controller_CAN_GetSnapshot(CTRL_ROTOR, &rotor) == 0U)
+    {
+        return;
+    }
+
+    memset(buf, 0, sizeof(buf));
+
+    if (rotor.msg3_received != 0U)
+    {
+        U16_TO_CAN_BE(buf, 0U, (uint16_t)rotor.iq_current_A);
+        U16_TO_CAN_BE(buf, 2U, (uint16_t)rotor.id_current_A);
+        buf[4] |= 0x04U;
+
+        if (rotor.msg3_age_ms <= ROTOR_DQ_FRESHNESS_MS)
+        {
+            buf[4] |= 0x08U;
+        }
+    }
+
+    /* The R0 DBC calls these byte-4 bit0 and byte-5 bit0 respectively.
+     * They are retained in the internal rotor error_code, but excluded
+     * from reserved bits of the existing CAN0 0x750 frame. */
+    if ((rotor.error_code & 0x0001U) != 0U)
+    {
+        buf[4] |= 0x01U;
+    }
+    if ((rotor.error_code & 0x0100U) != 0U)
+    {
+        buf[4] |= 0x02U;
+    }
+
+    if ((rotor.msg1_received != 0U) &&
+        (rotor.msg1_age_ms <= VC_CONTROLLER_MSG1_TIMEOUT_MS))
+    {
+        buf[4] |= 0x10U;
+    }
+    if ((rotor.msg2_received != 0U) &&
+        (rotor.msg2_age_ms <= VC_CONTROLLER_MSG2_TIMEOUT_MS))
+    {
+        buf[4] |= 0x20U;
+    }
+
+    U16_TO_CAN_BE(buf, 5U, rotor.msg3_age_ms);
+    Broadcast_Tx(CANID_ROTOR_DQ_STATUS, buf);
 }
 
 static void Update_Display_Snapshot(void)
@@ -672,6 +738,7 @@ void Broadcast_Task_100ms(void)
    static uint16_t error_repeat_counter = 0U; 
     EC_Update(100U);
     Broadcast_SendRotorDcBus();
+    Broadcast_SendRotorDqStatus();
 
    error_repeat_counter++;
     if (error_repeat_counter >= 1200U)    //120 sec 

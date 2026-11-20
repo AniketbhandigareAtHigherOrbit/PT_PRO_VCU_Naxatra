@@ -29,12 +29,16 @@
  */
 static volatile uint8_t  s_msg1_guard[CTRL_COUNT];
 static volatile uint8_t  s_msg2_guard[CTRL_COUNT];
+static volatile uint8_t  s_msg3_guard[CTRL_COUNT];
 static volatile uint8_t  s_msg1_update_sequence[CTRL_COUNT];
 static volatile uint8_t  s_msg2_update_sequence[CTRL_COUNT];
+static volatile uint8_t  s_msg3_update_sequence[CTRL_COUNT];
 static volatile uint16_t s_msg1_age_ms[CTRL_COUNT];
 static volatile uint16_t s_msg2_age_ms[CTRL_COUNT];
+static volatile uint16_t s_msg3_age_ms[CTRL_COUNT];
 static volatile uint8_t  s_msg1_received[CTRL_COUNT];
 static volatile uint8_t  s_msg2_received[CTRL_COUNT];
+static volatile uint8_t  s_msg3_received[CTRL_COUNT];
 
 /* ========================================================= */
 static uint16_t Saturating_Add_ms(uint16_t value, uint16_t increment)
@@ -49,6 +53,21 @@ static uint16_t Saturating_Add_ms(uint16_t value, uint16_t increment)
     }
 
     return (uint16_t)next_value;
+}
+
+/* The R0 DBC specifies signed Motorola 16-bit Id/Iq signals (0x233).
+ * Subtract in 32-bit arithmetic to avoid an implementation-defined
+ * out-of-range uint16_t-to-int16_t conversion. */
+static int16_t Decode_S16_BE(const uint8_t *data)
+{
+    uint16_t raw = (uint16_t)(((uint16_t)data[0] << 8U) | data[1]);
+
+    if ((raw & 0x8000U) != 0U)
+    {
+        return (int16_t)((int32_t)raw - 65536L);
+    }
+
+    return (int16_t)raw;
 }
 
 static uint8_t Get_ControllerIndex(uint32_t can_id)
@@ -120,12 +139,12 @@ void Controller_CAN_RxCallback(uint8_t CanNum_u8,
         return;
     }
 
-    /* Naxatra feedback is standard-ID traffic on CAN1 for the rotor only.
+    /* R0 DBC: standard-ID 0x411/0x412/0x233 on CAN1 for the rotor only.
      * Wheel feedback below remains on the legacy extended-ID protocol. */
     if ((Channel_u8 == NAXATRA_ROTOR_CHANNEL) &&
-        
         ((CanId_u32 == NAXATRA_STATUS1_ID) ||
-         (CanId_u32 == NAXATRA_STATUS2_ID)))
+         (CanId_u32 == NAXATRA_STATUS2_ID) ||
+         (CanId_u32 == NAXATRA_DQ_CURRENT_ID)))
     {
         ctrl_index = (uint8_t)CTRL_ROTOR;
         if (CanId_u32 == NAXATRA_STATUS1_ID)
@@ -140,14 +159,30 @@ void Controller_CAN_RxCallback(uint8_t CanNum_u8,
             VS_Controller[ctrl_index].status_feedback_3 = DataBuff_pu8[5];
             VS_Controller[ctrl_index].power_mode = DataBuff_pu8[6];
             VS_Controller[ctrl_index].handle_opening = DataBuff_pu8[7];
+            /* Low byte: all eight controller-fault bits. R0 assigns bit 0
+             * to LostPhaseFault (previous firmware discarded it).
+             * High byte: four motor faults plus CANRevLost at bit 0.
+             * Other byte-5 low bits are operating states, not faults. */
             VS_Controller[ctrl_index].error_code =
-                (uint16_t)((DataBuff_pu8[4] & 0xFEU) |
-                    ((uint16_t)(DataBuff_pu8[5] & 0xF0U) << 8U));
-            if (VS_Controller[ctrl_index].speed_rpm == 0U)
+                (uint16_t)((DataBuff_pu8[4] & NAXATRA_CONTROLLER_FAULT_MASK) |
+                    ((uint16_t)(DataBuff_pu8[5] &
+                      (NAXATRA_MOTOR_FAULT_MASK |
+                       NAXATRA_CAN_REVERSE_LOST_MASK)) << 8U));
+
+            /* The gear field, not RPM alone, indicates Park. A stopped
+             * rotor can still have first gear selected. Treat unsupported
+             * gear codes as unknown/STOP for direction diagnostics. */
+            if (((DataBuff_pu8[2] & NAXATRA_GEAR_MASK) >>
+                   NAXATRA_GEAR_SHIFT) == NAXATRA_GEAR_PARK)
             {
                 VS_Controller[ctrl_index].feedback_dir = DIR_STOP;
             }
-            else if ((DataBuff_pu8[3] & 0x10U) != 0U)
+            else if (((DataBuff_pu8[2] & NAXATRA_GEAR_MASK) >>
+                       NAXATRA_GEAR_SHIFT) > NAXATRA_GEAR_3)
+            {
+                VS_Controller[ctrl_index].feedback_dir = DIR_STOP;
+            }
+            else if ((DataBuff_pu8[3] & NAXATRA_REVERSE_STATUS_MASK) != 0U)
             {
                 VS_Controller[ctrl_index].feedback_dir = DIR_REVERSE;
             }
@@ -162,7 +197,7 @@ void Controller_CAN_RxCallback(uint8_t CanNum_u8,
             s_msg1_guard[ctrl_index]++;
             Update_ControllerAlive(ctrl_index);
         }
-        else
+        else if (CanId_u32 == NAXATRA_STATUS2_ID)
         {
             s_msg2_guard[ctrl_index]++;
             VS_Controller[ctrl_index].controller_temp_C =
@@ -186,6 +221,18 @@ void Controller_CAN_RxCallback(uint8_t CanNum_u8,
             s_msg2_received[ctrl_index] = 1U;
             s_msg2_update_sequence[ctrl_index]++;
             s_msg2_guard[ctrl_index]++;
+        }
+        else /* 0x233: signed Iq [0..1] and Id [2..3], big-endian, A. */
+        {
+            s_msg3_guard[ctrl_index]++;
+            VS_Controller[ctrl_index].iq_current_A =
+                Decode_S16_BE(&DataBuff_pu8[0]);
+            VS_Controller[ctrl_index].id_current_A =
+                Decode_S16_BE(&DataBuff_pu8[2]);
+            s_msg3_age_ms[ctrl_index] = 0U;
+            s_msg3_received[ctrl_index] = 1U;
+            s_msg3_update_sequence[ctrl_index]++;
+            s_msg3_guard[ctrl_index]++;
         }
         return;
     }
@@ -303,6 +350,9 @@ void Controller_CAN_TimeoutTask(uint16_t task_period_ms)
         s_msg2_age_ms[index] =
             Saturating_Add_ms(s_msg2_age_ms[index], task_period_ms);
 
+        s_msg3_age_ms[index] =
+            Saturating_Add_ms(s_msg3_age_ms[index], task_period_ms);
+
         Update_ControllerAlive(index);
     }
 }
@@ -315,6 +365,8 @@ uint8_t Controller_CAN_GetSnapshot(ControllerIndex_t index,
     uint8_t msg1_guard_after;
     uint8_t msg2_guard_before;
     uint8_t msg2_guard_after;
+    uint8_t msg3_guard_before;
+    uint8_t msg3_guard_after;
     uint8_t attempt;
 
     if ((snapshot == 0) || ((uint8_t)index >= (uint8_t)CTRL_COUNT))
@@ -332,9 +384,17 @@ uint8_t Controller_CAN_GetSnapshot(ControllerIndex_t index,
         }
 
         snapshot->speed_rpm = VS_Controller[index].speed_rpm;
-        snapshot->motor_current_A = VS_Controller[index].motor_current_A;
-        snapshot->battery_voltage_dV =
-            VS_Controller[index].battery_voltage_dV;
+        if (index != CTRL_ROTOR)
+        {
+            snapshot->motor_current_A = VS_Controller[index].motor_current_A;
+            snapshot->battery_voltage_dV =
+                VS_Controller[index].battery_voltage_dV;
+        }
+        else
+        {
+            snapshot->feedback_dir = VS_Controller[index].feedback_dir;
+            snapshot->switch_status = VS_Controller[index].switch_status;
+        }
         snapshot->error_code = VS_Controller[index].error_code;
         snapshot->msg1_received = s_msg1_received[index];
         snapshot->msg1_sequence = s_msg1_update_sequence[index];
@@ -361,17 +421,51 @@ uint8_t Controller_CAN_GetSnapshot(ControllerIndex_t index,
         snapshot->bus_current_dA = VS_Controller[index].bus_current_dA;
         snapshot->phase_current_RMS_A =
             VS_Controller[index].phase_current_RMS_A;
-        snapshot->feedback_dir = VS_Controller[index].feedback_dir;
+        if (index == CTRL_ROTOR)
+        {
+            /* The rotor receives current and voltage in 0x412, while
+             * speed/error/feedback direction arrive in 0x411. Read each
+             * under the matching sequence guard. */
+            snapshot->motor_current_A = VS_Controller[index].motor_current_A;
+            snapshot->battery_voltage_dV =
+                VS_Controller[index].battery_voltage_dV;
+        }
+        else
+        {
+            snapshot->feedback_dir = VS_Controller[index].feedback_dir;
+            snapshot->switch_status = VS_Controller[index].switch_status;
+        }
+        /* Rotor command_dir is task-owned and is one-byte atomic. */
         snapshot->command_dir = VS_Controller[index].command_dir;
-        snapshot->switch_status = VS_Controller[index].switch_status;
         snapshot->msg2_received = s_msg2_received[index];
         snapshot->msg2_sequence = s_msg2_update_sequence[index];
         snapshot->msg2_age_ms = s_msg2_age_ms[index];
 
         msg2_guard_after = s_msg2_guard[index];
 
-        if ((msg2_guard_before == msg2_guard_after) &&
-            ((msg2_guard_after & 0x01U) == 0U))
+        if ((msg2_guard_before != msg2_guard_after) ||
+            ((msg2_guard_after & 0x01U) != 0U))
+        {
+            continue;
+        }
+
+        msg3_guard_before = s_msg3_guard[index];
+
+        if ((msg3_guard_before & 0x01U) != 0U)
+        {
+            continue;
+        }
+
+        snapshot->iq_current_A = VS_Controller[index].iq_current_A;
+        snapshot->id_current_A = VS_Controller[index].id_current_A;
+        snapshot->msg3_received = s_msg3_received[index];
+        snapshot->msg3_sequence = s_msg3_update_sequence[index];
+        snapshot->msg3_age_ms = s_msg3_age_ms[index];
+
+        msg3_guard_after = s_msg3_guard[index];
+
+        if ((msg3_guard_before == msg3_guard_after) &&
+            ((msg3_guard_after & 0x01U) == 0U))
         {
             return 1U;
         }

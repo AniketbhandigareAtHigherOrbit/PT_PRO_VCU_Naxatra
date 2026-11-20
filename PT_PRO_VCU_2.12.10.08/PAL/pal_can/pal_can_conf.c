@@ -35,9 +35,9 @@
  ******************************************************************************/
 #define TOTAL_RX_FILTER_CAN_0       11
 #if (VC_BATTERY_PREFIX_FILTER_ENABLE == 1U)
-#define TOTAL_RX_FILTER_CAN_1       15
+#define TOTAL_RX_FILTER_CAN_1       16
 #else
-#define TOTAL_RX_FILTER_CAN_1       19
+#define TOTAL_RX_FILTER_CAN_1       20
 #endif
 #define TOTAL_RX_FILTER_CAN_2       2
 
@@ -117,6 +117,7 @@ CanRxFilterConf_St_t Can1RxFilterConf_aSt[TOTAL_RX_FILTER_CAN_1] =
 #endif
     {0x411, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
     {0x412, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
+    {0x233, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
 
     {0x0CF11E06, 0x1FFFFFFF, RX_FIFO_BUFF_E, EXT_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
     {0x0CF11F06, 0x1FFFFFFF, RX_FIFO_BUFF_E, EXT_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},

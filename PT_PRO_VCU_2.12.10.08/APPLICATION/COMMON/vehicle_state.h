@@ -167,6 +167,9 @@ typedef struct
     uint8_t status_feedback_3;
     uint8_t power_mode;
     uint8_t handle_opening;
+    /* Naxatra 0x233, signed 16-bit big-endian, 1 A/count. */
+    int16_t iq_current_A;
+    int16_t id_current_A;
 } ControllerState_t;
 
 extern ControllerState_t VS_Controller[CTRL_COUNT];
