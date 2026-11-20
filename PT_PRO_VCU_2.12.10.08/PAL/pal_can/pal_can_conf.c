@@ -26,6 +26,7 @@
 #include"vehicle_config.h"
 #include "NVM_config.h"
 #include "dashboard_can_rx.h"
+#include "naxatra_can.h"
 /*******************************************************************************
  *  MACRO DEFINITION
  ******************************************************************************/
@@ -33,19 +34,19 @@
 /*******************************************************************************
  *  GLOBAL VARIABLES DEFNITION 
  ******************************************************************************/
-#define TOTAL_RX_FILTER_CAN_0       11
+#define TOTAL_RX_FILTER_CAN_0       4
 #if (VC_BATTERY_PREFIX_FILTER_ENABLE == 1U)
-#define TOTAL_RX_FILTER_CAN_1       16
+#define TOTAL_RX_FILTER_CAN_1       12
 #else
-#define TOTAL_RX_FILTER_CAN_1       20
+#define TOTAL_RX_FILTER_CAN_1       16
 #endif
-#define TOTAL_RX_FILTER_CAN_2       2
+#define TOTAL_RX_FILTER_CAN_2       3
 
 
 
-const uint8_t Can0_Rx_filter_u8 = 3;
+const uint8_t Can0_Rx_filter_u8 = TOTAL_RX_FILTER_CAN_0;
 const uint8_t Can1_Rx_filter_u8 = TOTAL_RX_FILTER_CAN_1;
-const uint8_t Can2_Rx_filter_u8 = 2;
+const uint8_t Can2_Rx_filter_u8 = TOTAL_RX_FILTER_CAN_2;
 
 
  
@@ -82,13 +83,11 @@ void CAN1_UpdateBatteryRxFiltersFromNvm(void)
  ****************************   **************************************************/
 CanRxFilterConf_St_t Can0RxFilterConf_aSt[TOTAL_RX_FILTER_CAN_0] = 
 {
-
-
-    {0x0CF11E06, 0x1FFFFFFF, RX_FIFO_BUFF_E, EXT_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
-    {0x0CF11F06, 0x1FFFFFFF, RX_FIFO_BUFF_E, EXT_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
+    /* RIGHT Naxatra on CAN0; dashboard RX filter retained. */
+    {NAXATRA_STATUS1_ID, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
+    {NAXATRA_STATUS2_ID, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
+    {NAXATRA_DQ_CURRENT_ID, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
     {0x500, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Dashboard_CAN_RxCallback)},
-
-
 };
 
 CanRxFilterConf_St_t Can1RxFilterConf_aSt[TOTAL_RX_FILTER_CAN_1] =  
@@ -115,23 +114,18 @@ CanRxFilterConf_St_t Can1RxFilterConf_aSt[TOTAL_RX_FILTER_CAN_1] =
     {VC_S4_BTRY1_ID_DEFAULT, 0x00000000, RX_FIFO_BUFF_E, EXT_IDE_E, CAN_RX_CB(Call_Back_Battery_Rx)},
     {VC_S4_BTRY2_ID_DEFAULT, 0x00000000, RX_FIFO_BUFF_E, EXT_IDE_E, CAN_RX_CB(Call_Back_Battery_Rx)},
 #endif
-    {0x411, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
-    {0x412, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
-    {0x233, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
-
-    {0x0CF11E06, 0x1FFFFFFF, RX_FIFO_BUFF_E, EXT_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
-    {0x0CF11F06, 0x1FFFFFFF, RX_FIFO_BUFF_E, EXT_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
-
-    {0x0CF11E04, 0x1FFFFFFF, RX_FIFO_BUFF_E, EXT_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
-    {0x0CF11F04, 0x1FFFFFFF, RX_FIFO_BUFF_E, EXT_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
-
-
+    /* ROTOR Naxatra on CAN1; BMS/NVM filters above keep their indices. */
+    {NAXATRA_STATUS1_ID, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
+    {NAXATRA_STATUS2_ID, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
+    {NAXATRA_DQ_CURRENT_ID, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
 };
 
 CanRxFilterConf_St_t Can2RxFilterConf_aSt[TOTAL_RX_FILTER_CAN_2] = 
 {
-    {0x0CF11E04, 0x1FFFFFFF, RX_FIFO_BUFF_E, EXT_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
-    {0x0CF11F04, 0x1FFFFFFF, RX_FIFO_BUFF_E, EXT_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
+    /* LEFT Naxatra on CAN2. */
+    {NAXATRA_STATUS1_ID, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
+    {NAXATRA_STATUS2_ID, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
+    {NAXATRA_DQ_CURRENT_ID, 0x7FF, RX_FIFO_BUFF_E, STD_IDE_E, CAN_RX_CB(Controller_CAN_RxCallback)},
 
 };
   

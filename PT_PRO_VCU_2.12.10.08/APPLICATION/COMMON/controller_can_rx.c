@@ -3,13 +3,6 @@
 #include "naxatra_can.h"
 
 /* ========================================================= */
-#define CTRL_MSG1_BASE_ID      (0x0CF11E00UL)
-#define CTRL_MSG2_BASE_ID      (0x0CF11F00UL)
-
-#define CTRL_ID_LEFT           (4U)
-#define CTRL_ID_RIGHT          (6U)
-#define CTRL_ID_ROTOR          (5U)
-
 #ifndef VC_CONTROLLER_MSG1_TIMEOUT_MS
 #define VC_CONTROLLER_MSG1_TIMEOUT_MS   (300U)
 #endif
@@ -70,21 +63,17 @@ static int16_t Decode_S16_BE(const uint8_t *data)
     return (int16_t)raw;
 }
 
-static uint8_t Get_ControllerIndex(uint32_t can_id)
+static uint8_t Get_NaxatraControllerIndex(uint8_t can_channel)
 {
-    uint8_t dev_id;
-
-    dev_id = (uint8_t)(can_id & 0xFFU);
-
-    switch (dev_id)
+    switch (can_channel)
     {
-        case CTRL_ID_LEFT:
+        case NAXATRA_LEFT_CHANNEL:
             return (uint8_t)CTRL_WHEEL_LEFT;
 
-        case CTRL_ID_RIGHT:
+        case NAXATRA_RIGHT_CHANNEL:
             return (uint8_t)CTRL_WHEEL_RIGHT;
 
-        case CTRL_ID_ROTOR:
+        case NAXATRA_ROTOR_CHANNEL:
             return (uint8_t)CTRL_ROTOR;
 
         default:
@@ -119,34 +108,30 @@ void Controller_CAN_RxCallback(uint8_t CanNum_u8,
                                uint32_t CanId_u32)
 {
     uint8_t  ctrl_index;
-    uint32_t msg_base;
-    uint16_t speed_rpm;
     uint16_t current_raw;
     uint16_t voltage_raw;
-    uint16_t error_code;
 
     (void)CanNum_u8;
+    (void)CanMode_u8;
+    (void)Ide_u8;
 
-    /*
-     * Reject malformed and short frames before touching state.
-     * Do not reject only from Ide_u8: on this PAL integration the callback is
-     * reached through a casted filter callback and some SDK revisions do not
-     * forward the IDE flag consistently. The 29-bit CAN-ID base check below is
-     * the authoritative validation.
-     */
     if ((DataBuff_pu8 == 0) || (Dlc_u8 < 8U))
     {
         return;
     }
 
-    /* R0 DBC: standard-ID 0x411/0x412/0x233 on CAN1 for the rotor only.
-     * Wheel feedback below remains on the legacy extended-ID protocol. */
-    if ((Channel_u8 == NAXATRA_ROTOR_CHANNEL) &&
-        ((CanId_u32 == NAXATRA_STATUS1_ID) ||
-         (CanId_u32 == NAXATRA_STATUS2_ID) ||
-         (CanId_u32 == NAXATRA_DQ_CURRENT_ID)))
+    /* All three Naxatra controllers publish the same standard-ID feedback
+     * frames. They are isolated on different CAN buses; channel determines
+     * which VS_Controller[] state is updated. */
+    if ((CanId_u32 == NAXATRA_STATUS1_ID) ||
+        (CanId_u32 == NAXATRA_STATUS2_ID) ||
+        (CanId_u32 == NAXATRA_DQ_CURRENT_ID))
     {
-        ctrl_index = (uint8_t)CTRL_ROTOR;
+        ctrl_index = Get_NaxatraControllerIndex(Channel_u8);
+        if (ctrl_index >= (uint8_t)CTRL_COUNT)
+        {
+            return;
+        }
         if (CanId_u32 == NAXATRA_STATUS1_ID)
         {
             s_msg1_guard[ctrl_index]++;
@@ -170,7 +155,7 @@ void Controller_CAN_RxCallback(uint8_t CanNum_u8,
                        NAXATRA_CAN_REVERSE_LOST_MASK)) << 8U));
 
             /* The gear field, not RPM alone, indicates Park. A stopped
-             * rotor can still have first gear selected. Treat unsupported
+             * motor can still have first gear selected. Treat unsupported
              * gear codes as unknown/STOP for direction diagnostics. */
             if (((DataBuff_pu8[2] & NAXATRA_GEAR_MASK) >>
                    NAXATRA_GEAR_SHIFT) == NAXATRA_GEAR_PARK)
@@ -237,98 +222,7 @@ void Controller_CAN_RxCallback(uint8_t CanNum_u8,
         return;
     }
 
-    msg_base = (CanId_u32 & 0xFFFFFF00UL);
-
-    if ((msg_base != CTRL_MSG1_BASE_ID) &&
-        (msg_base != CTRL_MSG2_BASE_ID))
-    {
-        return;
-    }
-
-    ctrl_index = Get_ControllerIndex(CanId_u32);
-
-    if (ctrl_index >= (uint8_t)CTRL_COUNT)
-    {
-        return;
-    }
-
-    /* =====================================================
-     * MESSAGE 1: 0x0CF11E00 + DeviceID
-     * ===================================================== */
-    if (msg_base == CTRL_MSG1_BASE_ID)
-    {
-        speed_rpm =
-            (uint16_t)(((uint16_t)DataBuff_pu8[1] << 8U) |
-                       (uint16_t)DataBuff_pu8[0]);
-
-        current_raw =
-            (uint16_t)(((uint16_t)DataBuff_pu8[3] << 8U) |
-                       (uint16_t)DataBuff_pu8[2]);
-
-        voltage_raw =
-            (uint16_t)(((uint16_t)DataBuff_pu8[5] << 8U) |
-                       (uint16_t)DataBuff_pu8[4]);
-
-        error_code =
-            (uint16_t)(((uint16_t)DataBuff_pu8[7] << 8U) |
-                       (uint16_t)DataBuff_pu8[6]);
-
-        /* Begin sequence-locked update. */
-        s_msg1_guard[ctrl_index]++;
-
-        VS_Controller[ctrl_index].speed_rpm = speed_rpm;
-        VS_Controller[ctrl_index].motor_current_A =
-            (int16_t)(current_raw / 10U);
-        VS_Controller[ctrl_index].battery_voltage_dV = voltage_raw;
-        VS_Controller[ctrl_index].error_code = error_code;
-
-        s_msg1_age_ms[ctrl_index] = 0U;
-        s_msg1_received[ctrl_index] = 1U;
-        s_msg1_update_sequence[ctrl_index]++;
-
-        s_msg1_guard[ctrl_index]++;
-
-        Update_ControllerAlive(ctrl_index);
-    }
-    /* =====================================================
-     * MESSAGE 2: 0x0CF11F00 + DeviceID
-     * ===================================================== */
-    else
-    {
-        uint8_t controller_temp;
-        uint8_t motor_temp;
-
-        /* Clamp below-offset raw values instead of allowing uint8 underflow. */
-        controller_temp =
-            (DataBuff_pu8[2] >= 40U) ?
-            (uint8_t)(DataBuff_pu8[2] - 40U) : 0U;
-
-        motor_temp =
-            (DataBuff_pu8[3] >= 30U) ?
-            (uint8_t)(DataBuff_pu8[3] - 30U) : 0U;
-
-        /* Begin sequence-locked update. */
-        s_msg2_guard[ctrl_index]++;
-
-        VS_Controller[ctrl_index].controller_temp_C =
-            controller_temp;
-        VS_Controller[ctrl_index].motor_temp_C =
-            motor_temp;
-
-        VS_Controller[ctrl_index].feedback_dir =
-            (uint8_t)(DataBuff_pu8[4] & 0x03U);
-
-        VS_Controller[ctrl_index].command_dir =
-            (uint8_t)((DataBuff_pu8[4] >> 2U) & 0x03U);
-
-        VS_Controller[ctrl_index].switch_status = DataBuff_pu8[5];
-
-        s_msg2_age_ms[ctrl_index] = 0U;
-        s_msg2_received[ctrl_index] = 1U;
-        s_msg2_update_sequence[ctrl_index]++;
-
-        s_msg2_guard[ctrl_index]++;
-    }
+    /* Unknown/legacy controller CAN IDs are not decoded for this build. */
 }
 
 /* ========================================================= */
@@ -384,17 +278,8 @@ uint8_t Controller_CAN_GetSnapshot(ControllerIndex_t index,
         }
 
         snapshot->speed_rpm = VS_Controller[index].speed_rpm;
-        if (index != CTRL_ROTOR)
-        {
-            snapshot->motor_current_A = VS_Controller[index].motor_current_A;
-            snapshot->battery_voltage_dV =
-                VS_Controller[index].battery_voltage_dV;
-        }
-        else
-        {
-            snapshot->feedback_dir = VS_Controller[index].feedback_dir;
-            snapshot->switch_status = VS_Controller[index].switch_status;
-        }
+        snapshot->feedback_dir = VS_Controller[index].feedback_dir;
+        snapshot->switch_status = VS_Controller[index].switch_status;
         snapshot->error_code = VS_Controller[index].error_code;
         snapshot->msg1_received = s_msg1_received[index];
         snapshot->msg1_sequence = s_msg1_update_sequence[index];
@@ -421,21 +306,11 @@ uint8_t Controller_CAN_GetSnapshot(ControllerIndex_t index,
         snapshot->bus_current_dA = VS_Controller[index].bus_current_dA;
         snapshot->phase_current_RMS_A =
             VS_Controller[index].phase_current_RMS_A;
-        if (index == CTRL_ROTOR)
-        {
-            /* The rotor receives current and voltage in 0x412, while
-             * speed/error/feedback direction arrive in 0x411. Read each
-             * under the matching sequence guard. */
-            snapshot->motor_current_A = VS_Controller[index].motor_current_A;
-            snapshot->battery_voltage_dV =
-                VS_Controller[index].battery_voltage_dV;
-        }
-        else
-        {
-            snapshot->feedback_dir = VS_Controller[index].feedback_dir;
-            snapshot->switch_status = VS_Controller[index].switch_status;
-        }
-        /* Rotor command_dir is task-owned and is one-byte atomic. */
+        /* All Naxatra controllers report current/voltage in 0x412, while
+         * speed/error/feedback direction arrive in 0x411. */
+        snapshot->motor_current_A = VS_Controller[index].motor_current_A;
+        snapshot->battery_voltage_dV = VS_Controller[index].battery_voltage_dV;
+        /* command_dir is task-owned and one-byte atomic. */
         snapshot->command_dir = VS_Controller[index].command_dir;
         snapshot->msg2_received = s_msg2_received[index];
         snapshot->msg2_sequence = s_msg2_update_sequence[index];

@@ -31,7 +31,7 @@ typedef struct
     uint8_t  msg2_sequence;
     uint16_t msg1_age_ms;
     uint16_t msg2_age_ms;
-    /* Naxatra rotor 0x233 Id/Iq measurements and independent freshness. */
+    /* Naxatra 0x233 Id/Iq measurements for each of the three controllers. */
     int16_t  iq_current_A;
     int16_t  id_current_A;
     uint8_t  msg3_received;
