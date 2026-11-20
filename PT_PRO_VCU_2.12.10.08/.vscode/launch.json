@@ -1,0 +1,24 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "cppdbg",
+      "request": "launch",
+      "args": [],
+      "stopAtEntry": false,
+      "externalConsole": true,
+      "cwd": "c:/Users/chowd/OneDrive/Dokumen/GitHub/VCU-Development/PT_PRO_VCU_2.1.00.00/APPLICATION/CONFIG",
+      "program": "c:/Users/chowd/OneDrive/Dokumen/GitHub/VCU-Development/PT_PRO_VCU_2.1.00.00/APPLICATION/CONFIG/build/Debug/outDebug",
+      "MIMode": "gdb",
+      "miDebuggerPath": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    }
+  ]
+}
