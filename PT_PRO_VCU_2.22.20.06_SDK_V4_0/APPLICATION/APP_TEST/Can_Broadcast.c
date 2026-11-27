@@ -45,8 +45,8 @@
 #define DISPLAY_VERSION      0x601U
 
 #define CODE_VERSION_MAJOR       2U
-#define CODE_VERSION_MINOR       1U
-#define CODE_VERSION_PATCH1      1U
+#define CODE_VERSION_MINOR       22U
+#define CODE_VERSION_PATCH1      2U
 #define CODE_VERSION_PATCH2      0U
 #define CODE_VERSION_BUILD1      0U
 #define CODE_VERSION_BUILD2      6U
@@ -482,7 +482,6 @@ static void Send_Display_(void)
     buf[2] = g_display_snapshot.rotor_mode_state;
     buf[3] = g_display_snapshot.bms1_alive;
     buf[4] = g_display_snapshot.bms2_alive;
-    
     buf[7] = s_psm_soc_lock_cause;
     Broadcast_Tx(DISPLASY_DATA2, buf);    
 }
@@ -490,7 +489,6 @@ static void Send_Display_(void)
 static void Gpio_left_right(void)
 {
     static uint8_t gpio_100ms_counter = 0U;
-    
     gpio_100ms_counter++;
 
     if (gpio_100ms_counter >= 10U)

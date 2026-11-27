@@ -532,7 +532,7 @@ void CAN_functionality(void)
                                 wheel_cmd_direction,
                                 0U);
 
-    Send_RPM_To_RotController(VC_ROTOR_ID,VS_RPM_Rotor,1U);
+    Send_RPM_To_RotController(VC_ROTOR_ID, 2999U, 1U);
 
 }
 
