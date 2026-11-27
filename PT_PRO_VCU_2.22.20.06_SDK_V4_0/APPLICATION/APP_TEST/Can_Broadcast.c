@@ -88,6 +88,8 @@ static uint16_t Broadcast_60sCounter = 0U;
 static uint8_t  Broadcast_StartupDone = 0U;
 static uint8_t  Broadcast_60sPending = 0U;
 static uint8_t  Broadcast_StartupFrameTxCount = 0U;
+static uint16_t Broadcast_ErrorRepeatCounter = 0U;
+static uint8_t  Broadcast_LastSocLockCause = 0U;
 
 typedef struct
 {
@@ -166,7 +168,11 @@ static void Broadcast_SendRotorDcBus(void)
     int32_t current_dA;
     ControllerFeedbackSnapshot_t rotor;
 
-    if (Controller_CAN_GetSnapshot(CTRL_ROTOR, &rotor) == 0U)
+    if ((Controller_CAN_GetSnapshot(CTRL_ROTOR, &rotor) == 0U) ||
+        (rotor.msg1_received == 0U) ||
+        (rotor.msg1_age_ms > VC_CONTROLLER_MSG1_TIMEOUT_MS) ||
+        (rotor.msg2_received == 0U) ||
+        (rotor.msg2_age_ms > VC_CONTROLLER_MSG2_TIMEOUT_MS))
     {
         return;
     }
@@ -348,6 +354,20 @@ static void Broadcast_Send1sFrames(void)
     */
 }
 
+/* Keep the 0x707 payload identical for periodic and change-triggered TX. */
+static void Broadcast_SendBms1Wvc(void)
+{
+    uint8_t buf[8];
+    uint8_t cause = s_psm_soc_lock_cause;
+    memset(buf, 0, sizeof(buf));
+    buf[0] = VS_Battery1.SOH;
+    U16_TO_CAN_BE(buf, 1U, VS_Battery1.Cycles);
+    U16_TO_CAN_BE(buf, 3U, VS_Battery1.BatteryCapacity_raw);
+    buf[5] = cause;
+    Broadcast_Tx(CANID_BMS1_WVC, buf);
+    Broadcast_LastSocLockCause = cause;
+}
+
 /* ================= 60 Second Frames ================= */
 
 static void Broadcast_Send60sFrames(void)
@@ -441,12 +461,7 @@ static void Broadcast_Send60sFrames(void)
     U16_TO_CAN_BE(buf, 6U, VS_Battery2.CellVoltage_raw_mV[15]);
     Broadcast_Tx(CANID_BMS2_CELL_13_16, buf);
 
-    memset(buf, 0, sizeof(buf));
-    buf[0] = VS_Battery1.SOH;
-    U16_TO_CAN_BE(buf, 1U, VS_Battery1.Cycles);
-    U16_TO_CAN_BE(buf, 3U, VS_Battery1.BatteryCapacity_raw);
-    buf[5] = s_psm_soc_lock_cause;
-    Broadcast_Tx(CANID_BMS1_WVC, buf);
+    Broadcast_SendBms1Wvc();
  
     memset(buf, 0, sizeof(buf));
     buf[0] = VS_Battery2.SOH;
@@ -482,6 +497,7 @@ static void Send_Display_(void)
     buf[2] = g_display_snapshot.rotor_mode_state;
     buf[3] = g_display_snapshot.bms1_alive;
     buf[4] = g_display_snapshot.bms2_alive;
+    
     buf[7] = s_psm_soc_lock_cause;
     Broadcast_Tx(DISPLASY_DATA2, buf);    
 }
@@ -489,6 +505,7 @@ static void Send_Display_(void)
 static void Gpio_left_right(void)
 {
     static uint8_t gpio_100ms_counter = 0U;
+    
     gpio_100ms_counter++;
 
     if (gpio_100ms_counter >= 10U)
@@ -507,7 +524,12 @@ static void Send_Pending_Error_Frames(void)
 
     /* ================= EV ================= */
 
-    if(EV_GetNextPendingCanFrame(&frame) != 0U)
+    /* Final TX guard: an EV ID is an active error indication to IoT. */
+    if ((EV_GetNextPendingCanFrame(&frame) != 0U) &&
+        (frame.dlc == 8U) &&
+        (frame.data[2] == 1U) &&
+        (EC_IsActive((EV_Code_t)frame.data[0]) != 0U) &&
+        (frame.id == EV_GetCanIdForError((EV_Code_t)frame.data[0])))
     {
         CanMsgTransmit(
             BROADCAST_CAN_CHANNEL,
@@ -522,7 +544,8 @@ static void Send_Pending_Error_Frames(void)
     /* ================= EC ================= */
 
     
-    if(EC_GetNextPendingCanFrame(&frame) != 0U)
+    if ((EC_GetNextPendingCanFrame(&frame) != 0U) &&
+        ((frame.data[0] != 0U) || (frame.data[1] != 0U)))
     {
         CanMsgTransmit(
             BROADCAST_CAN_CHANNEL,
@@ -536,7 +559,8 @@ static void Send_Pending_Error_Frames(void)
 
     /* ================= EB ================= */
 
-    if(EB_GetNextPendingCanFrame(&frame) != 0U)
+    if ((EB_GetNextPendingCanFrame(&frame) != 0U) &&
+        (frame.data[0] != 0U))
     {
         CanMsgTransmit(
             BROADCAST_CAN_CHANNEL,
@@ -548,64 +572,6 @@ static void Send_Pending_Error_Frames(void)
         );
     }
 }
-
- static void Send_Repeat_Error_Frames(void)
-{
-    EV_CanFrame_t frame;
-    uint8_t i;
-
-    /* ================= EV ================= */
-
-    while(EV_GetNextPendingCanFrame(&frame) != 0U)
-    {
-        CanMsgTransmit(
-            BROADCAST_CAN_CHANNEL,
-            frame.data,
-            frame.dlc,
-            0U,
-            frame.is_extended,
-            frame.id
-        );
-    }
-
-    /* ================= EC ================= */
-
-    for(i = 0U; i < CTRL_COUNT; i++)
-    {
-        if(EC_GetNextPendingCanFrame(&frame) == 0U)
-        {
-            break;
-        }
-
-        CanMsgTransmit(
-            BROADCAST_CAN_CHANNEL,
-            frame.data,
-            frame.dlc,
-            0U,
-            frame.is_extended,
-            frame.id
-        );
-    }
-
-     /*================= EB ================= */
-
-    for(i = 0U; i < 10U; i++)
-    {
-        if(EB_GetNextPendingCanFrame(&frame) == 0U)
-        {
-            break;
-        }
-
-        CanMsgTransmit(
-           BROADCAST_CAN_CHANNEL,
-            frame.data,
-            frame.dlc,
-            0U,
-            frame.is_extended,
-            frame.id
-        );
-    }
-} 
 
 /* ================= Controller Telemetry TX ================= */
 
@@ -660,6 +626,8 @@ void Broadcast_Init(void)
     Broadcast_60sPending = 0U;
     Broadcast_StartupFrameTxCount = 0U;
     BROADCAST_STARTUP_COUNTER = STARTUP_FRAME_PERIOD_TICKS;
+    Broadcast_ErrorRepeatCounter = 0U;
+    Broadcast_LastSocLockCause = 0xFFU; /* Send initial state on first task. */
     EC_Init();
     Update_Display_Snapshot();
 }
@@ -667,15 +635,21 @@ void Broadcast_Init(void)
 void Broadcast_Task_100ms(void)
 
 {
-   static uint16_t error_repeat_counter = 0U; 
     EC_Update(100U);
     Broadcast_SendRotorDcBus();
 
-   error_repeat_counter++;
-    if (error_repeat_counter >= 1200U)    //120 sec 
+    Broadcast_ErrorRepeatCounter++;
+    if (Broadcast_ErrorRepeatCounter >= 1200U)
     {
-        error_repeat_counter = 0U;
-        Send_Repeat_Error_Frames();
+        Broadcast_ErrorRepeatCounter = 0U;
+        EC_QueueAllActiveErrors();
+    }
+    /* Drain at most one EV, EC and EB per cycle, including slow-frame cycles. */
+    Send_Pending_Error_Frames();
+    Send_Display_();
+    if (Broadcast_LastSocLockCause != s_psm_soc_lock_cause)
+    {
+        Broadcast_SendBms1Wvc();
     }
 
     if (Broadcast_StartupDone == 0U)
@@ -726,8 +700,5 @@ void Broadcast_Task_100ms(void)
         Broadcast_60sCounter = 0U;
         Broadcast_60sPending = 1U;
     }
-        /* normal cycle also send newly generated error frames */
-    Send_Display_();
-    Send_Pending_Error_Frames();
     Gpio_left_right();
 } 

@@ -45,11 +45,11 @@ static uint8_t  s_turn_override_armed = 0U;
  * IoT mapping:
  *   0x01 = Battery 1 low SOC
  *   0x02 = Battery 2 low SOC
- *   0x04 = Two-battery average SOC low
+ *   0x04 = Absolute difference between battery SOC values
  *   0x08 = Critical battery current
  *   0x10 = Direct battery cut-off pattern
  *   0x20 = Battery-current slope/cut-off pattern
- *   0x40 = Startup waiting for first valid SOC data
+ *   0x40 = Waiting for valid SOC data while SOC protection inhibits rotor
  *
  * VS_RotorLockLastCause and the trip snapshot remain available after the
  * active lock clears, allowing a slower IoT broadcast task to report the
@@ -100,8 +100,18 @@ static uint16_t s_batt_damp_reentry_ms = 0U;
 static uint8_t  s_batt_damp_state_internal = BATT_DAMP_STATE_WAIT_ENTRY;
 static uint8_t  s_batt_lock_reason = BATT_LOCK_REASON_NONE;
 
+/* Public CAN diagnostic: confirmed SOC causes plus active data-wait bit.
+ * Keep the confirmed mask separate so data-wait cannot affect recovery. */
+#if VC_PSM_SOC_ENABLE && (VC_ROTOR_BATTERY_STOP_BYPASS == 0U)
+uint8_t s_psm_soc_lock_cause = ROTOR_LOCK_CAUSE_SOC_DATA_WAIT;
+#else
 uint8_t s_psm_soc_lock_cause = ROTOR_LOCK_CAUSE_NONE;
+#endif
+static uint8_t s_psm_soc_confirmed_cause = ROTOR_LOCK_CAUSE_NONE;
 static uint8_t  s_psm_soc_lock_valid_mask = 0U;
+static uint8_t  s_psm_soc_pending_cause = ROTOR_LOCK_CAUSE_NONE;
+static uint8_t  s_psm_soc_new_cause = ROTOR_LOCK_CAUSE_NONE;
+static uint16_t s_psm_soc_new_cause_ms = 0U;
 static uint8_t  s_psm_soc_immediate_inhibit = 1U;
 static uint8_t  s_psm_soc_immediate_cause = ROTOR_LOCK_CAUSE_SOC_DATA_WAIT;
 static uint8_t  s_psm_soc_data_seen = 0U;
@@ -927,18 +937,21 @@ static void MachineDrive_UpdateSocRotorLock(void)
     uint8_t valid_mask = 0U;
     uint8_t low_soc_cause = ROTOR_LOCK_CAUSE_NONE;
     uint8_t clear_soc_condition = 0U;
-    uint16_t average_soc = 0U;
+    uint8_t new_cause;
+    uint16_t soc_difference = 0U;
 
     b1_soc_valid =
         (uint8_t)(((VS_Battery1.Alive != 0U) &&
                    (VS_Battery1.BatteryVoltage_raw >
                     VC_BATT_VALID_VOLTAGE_RAW) &&
+                   (VS_Battery1.Voltage_dV > 0U) &&
                    (soc1 <= 100U)) ? 1U : 0U);
 
     b2_soc_valid =
         (uint8_t)(((VS_Battery2.Alive != 0U) &&
                    (VS_Battery2.BatteryVoltage_raw >
                     VC_BATT_VALID_VOLTAGE_RAW) &&
+                   (VS_Battery2.Voltage_dV > 0U) &&
                    (soc2 <= 100U)) ? 1U : 0U);
 
     if (b1_soc_valid != 0U)
@@ -965,14 +978,14 @@ static void MachineDrive_UpdateSocRotorLock(void)
     {
         if(soc1 > soc2)
         {
-            average_soc = (uint16_t)(soc1-soc2);
+            soc_difference = (uint16_t)(soc1-soc2);
         }
         else
         {
-            average_soc = (uint16_t)(soc2-soc1);
+            soc_difference = (uint16_t)(soc2-soc1);
         }
 
-        if (average_soc >= VC_PSM_AVG_SOC_DIFF)
+        if (soc_difference >= VC_PSM_AVG_SOC_DIFF)
         {
             low_soc_cause |= ROTOR_LOCK_CAUSE_SOC_AVERAGE;
         }
@@ -988,6 +1001,12 @@ static void MachineDrive_UpdateSocRotorLock(void)
         if ((valid_mask != 0U) &&
             (low_soc_cause != ROTOR_LOCK_CAUSE_NONE))
         {
+            /* Do not confirm a new cause using time accumulated by another. */
+            if (s_psm_soc_pending_cause != low_soc_cause)
+            {
+                s_psm_soc_pending_cause = low_soc_cause;
+                VS_PsmSocConfirmTimer_ms = 0U;
+            }
             /* Saturating addition avoids a uint16_t timer wraparound. */
             if (VS_PsmSocConfirmTimer_ms <
                 VC_PSM_SOC_CONFIRM_TIME_MS)
@@ -1011,15 +1030,17 @@ static void MachineDrive_UpdateSocRotorLock(void)
                 VC_PSM_SOC_CONFIRM_TIME_MS)
             {
                 VS_PsmRotorLock = 1U;
-                s_psm_soc_lock_cause = low_soc_cause;
+                s_psm_soc_confirmed_cause = low_soc_cause;
                 s_psm_soc_lock_valid_mask = valid_mask;
+                s_psm_soc_pending_cause = ROTOR_LOCK_CAUSE_NONE;
                 VS_PsmSocConfirmTimer_ms = 0U;
             }
         }
         else
         {
             VS_PsmSocConfirmTimer_ms = 0U;
-            s_psm_soc_lock_cause = ROTOR_LOCK_CAUSE_NONE;
+            s_psm_soc_pending_cause = ROTOR_LOCK_CAUSE_NONE;
+            s_psm_soc_confirmed_cause = ROTOR_LOCK_CAUSE_NONE;
             s_psm_soc_lock_valid_mask = 0U;
         }
     }
@@ -1031,7 +1052,42 @@ static void MachineDrive_UpdateSocRotorLock(void)
          * prevents the healthy battery from clearing a lock caused by the
          * other battery disappearing from the bus.
          */
+        /* Retain confirmed causes until recovery. Qualify additional causes
+         * separately so a transient low SOC cannot become a latched cause. */
+        new_cause = (uint8_t)(low_soc_cause & (uint8_t)~s_psm_soc_confirmed_cause);
+        if (new_cause != s_psm_soc_new_cause)
+        {
+            s_psm_soc_new_cause = new_cause;
+            s_psm_soc_new_cause_ms = 0U;
+        }
+        if (new_cause != ROTOR_LOCK_CAUSE_NONE)
+        {
+            if ((uint32_t)s_psm_soc_new_cause_ms + MACHINE_DRIVE_TASK_PERIOD_MS >=
+                VC_PSM_SOC_CONFIRM_TIME_MS)
+            {
+                s_psm_soc_confirmed_cause |= new_cause;
+                s_psm_soc_lock_valid_mask |= valid_mask;
+                s_psm_soc_new_cause = ROTOR_LOCK_CAUSE_NONE;
+                s_psm_soc_new_cause_ms = 0U;
+            }
+            else
+            {
+                s_psm_soc_new_cause_ms = (uint16_t)(s_psm_soc_new_cause_ms +
+                                                    MACHINE_DRIVE_TASK_PERIOD_MS);
+            }
+        }
+        else
+        {
+            s_psm_soc_new_cause_ms = 0U;
+        }
         clear_soc_condition = 1U;
+        if ((low_soc_cause != ROTOR_LOCK_CAUSE_NONE) ||
+            (((s_psm_soc_confirmed_cause & ROTOR_LOCK_CAUSE_SOC_AVERAGE) != 0U) &&
+             ((valid_mask != 0x03U) ||
+              (soc_difference >= VC_PSM_AVG_SOC_DIFF))))
+        {
+            clear_soc_condition = 0U;
+        }
 
         if ((s_psm_soc_lock_valid_mask & 0x01U) != 0U)
         {
@@ -1081,8 +1137,10 @@ static void MachineDrive_UpdateSocRotorLock(void)
             {
                 VS_PsmRotorLock = 0U;
                 VS_PsmSocConfirmTimer_ms = 0U;
-                s_psm_soc_lock_cause = ROTOR_LOCK_CAUSE_NONE;
+                s_psm_soc_confirmed_cause = ROTOR_LOCK_CAUSE_NONE;
                 s_psm_soc_lock_valid_mask = 0U;
+                s_psm_soc_new_cause = ROTOR_LOCK_CAUSE_NONE;
+                s_psm_soc_new_cause_ms = 0U;
             }
         }
         else
@@ -1091,10 +1149,14 @@ static void MachineDrive_UpdateSocRotorLock(void)
         }
     }
 
+    VS_PsmRotorLockDueToSocDiff =
+        (uint8_t)((VS_PsmRotorLock != 0U) &&
+                  ((s_psm_soc_confirmed_cause & ROTOR_LOCK_CAUSE_SOC_AVERAGE) != 0U));
+
     if (VS_PsmRotorLock != 0U)
     {
         s_psm_soc_immediate_inhibit = 1U;
-        s_psm_soc_immediate_cause = s_psm_soc_lock_cause;
+        s_psm_soc_immediate_cause = (uint8_t)(s_psm_soc_confirmed_cause | low_soc_cause);
     }
     else if (low_soc_cause != ROTOR_LOCK_CAUSE_NONE)
     {
@@ -1111,10 +1173,29 @@ static void MachineDrive_UpdateSocRotorLock(void)
         s_psm_soc_immediate_inhibit = 0U;
         s_psm_soc_immediate_cause = ROTOR_LOCK_CAUSE_NONE;
     }
+
+    /* Publish data-wait immediately whenever the existing PSM logic is
+     * inhibiting the rotor and no battery has valid SOC/voltage data.
+     * This covers startup and loss of all valid data during a latched lock.
+     * Do not feed the diagnostic bit back into the confirmed lock state. */
+    s_psm_soc_lock_cause = s_psm_soc_confirmed_cause;
+    if ((VC_ROTOR_BATTERY_STOP_BYPASS == 0U) &&
+        (s_psm_soc_immediate_inhibit != 0U) &&
+        (valid_mask == 0U))
+    {
+        s_psm_soc_lock_cause |= ROTOR_LOCK_CAUSE_SOC_DATA_WAIT;
+    }
 #else
     /* Feature-disabled builds must never report a stale SOC lock cause. */
+    VS_PsmRotorLock = 0U;
+    VS_PsmRotorLockDueToSocDiff = 0U;
+    VS_PsmSocConfirmTimer_ms = 0U;
+    s_psm_soc_confirmed_cause = ROTOR_LOCK_CAUSE_NONE;
     s_psm_soc_lock_cause = ROTOR_LOCK_CAUSE_NONE;
     s_psm_soc_lock_valid_mask = 0U;
+    s_psm_soc_pending_cause = ROTOR_LOCK_CAUSE_NONE;
+    s_psm_soc_new_cause = ROTOR_LOCK_CAUSE_NONE;
+    s_psm_soc_new_cause_ms = 0U;
     s_psm_soc_immediate_inhibit = 0U;
     s_psm_soc_immediate_cause = ROTOR_LOCK_CAUSE_NONE;
     s_psm_soc_data_seen = 0U;
